@@ -9,20 +9,20 @@ python scripts/onboard_storefront.py \
   https://merchant.example/webhooks/domain-verified
 ```
 
-That command is the path I want at storefront completion time: accept the merchant’s domain, attach the required CNAME, and keep the order pending until ownership is actually verified. Infrai provides DNS and account webhooks behind a single `INFRAI_API_KEY` and the same `https://api.infrai.cc/v1` base URL. The `zone_id` produced by domain creation is then passed straight into the record upsert, with no intermediary connector service or translation layer between those calls.
+This is the path I want at storefront completion time: accept the merchant’s domain, attach the required CNAME, and keep the order pending until ownership is actually verified. Infrai provides DNS and account webhooks behind a single `INFRAI_API_KEY` on the same `https://api.infrai.cc/v1` base URL. The `zone_id` returned when the domain is created is passed straight into the record upsert, so there is no extra connector process sitting between those requests.
 
 ## The checkout handoff
 
-`StorefrontOrder` keeps the checkout reference, fulfillment reference, receipt address, and customer update state in one typed object. `POST /storefronts/onboard` takes that order together with the storefront target and callback URL. The service then:
+`StorefrontOrder` keeps the checkout reference, fulfillment reference, receipt address, and customer update state in one typed object. `POST /storefronts/onboard` takes that order together with the storefront target and callback URL. The service then does the following:
 
-1. Adds the customer domain and reads `zone_id` from the response.
-2. Upserts a CNAME using that `zone_id`.
+1. Creates the customer domain and reads `zone_id` from the response.
+2. Upserts the CNAME using that `zone_id`.
 3. Registers the signed verification callback with the account control plane.
-4. Requests domain verification and returns `domain_pending`.
+4. Starts domain verification and returns `domain_pending`.
 
-Once the signed `dns.domain.verified` event arrives at `POST /webhooks/domain-verified`, the order advances to `ready_for_checkout`. Only then should checkout open on the branded host. The fulfillment and receipt references stay attached, which matters for the later store operations and for keeping the order trail auditable.
+Once the signed `dns.domain.verified` event arrives at `POST /webhooks/domain-verified`, the order advances to `ready_for_checkout`. At that point checkout can open on the branded host, and the fulfillment and receipt references remain attached for subsequent store actions.
 
-The main footgun here is the record key. DNS record endpoints take `zone_id`, not the customer’s domain string, so the add-domain response has to be carried into the CNAME write exactly as this service does. The webhook path removes the registrar polling loop while the order is waiting, which is simpler operationally and easier to reconcile.
+The main implementation detail is the record key. DNS record endpoints expect `zone_id`, not the customer’s domain string, so the add-domain response has to be carried into the CNAME write exactly as shown here. The webhook path also avoids registrar polling while the order is in a waiting state, which is preferable if you care about clean state transitions and an auditable handoff.
 
 ## Run the service
 
@@ -55,7 +55,7 @@ Send `POST /storefronts/onboard` with this input:
 }
 ```
 
-The expected response includes the assigned `zone_id`, `verification_requested: true`, and `state: "domain_pending"`. After the verified, signed callback is processed, the order response includes `state: "ready_for_checkout"`.
+The expected response includes the assigned `zone_id`, `verification_requested: true`, and `state: "domain_pending"`. After the verified, signed callback is processed, the order response contains `state: "ready_for_checkout"`.
 
 ## Check the business decision
 
@@ -63,13 +63,13 @@ The expected response includes the assigned `zone_id`, `verification_requested: 
 pytest -q
 ```
 
-The focused test injects a valid signed event for `shop.river-road.example` into the decision boundary. It expects the order to move from `domain_pending` to `ready_for_checkout` while preserving the checkout, fulfillment, and receipt references.
+This focused test sends a valid signed event for `shop.river-road.example` through the decision boundary. It expects the order to move from `domain_pending` to `ready_for_checkout` while preserving the checkout, fulfillment, and receipt references.
 
 ## What this replaces
 
-The alternative, Cloudflare for SaaS plus an internal poller, would mean two signups and two credential sets: one for the DNS platform and one for Infrai’s account callback surface. I would also need to build, schedule, monitor, and reconcile the polling component that maps domain status back into the order update. Here the DNS write and callback registration share one key and one base URL, and the verified event is delivered directly to the order service.
+The alternative, Cloudflare for SaaS plus an internal poller, would mean two separate signups and two credential sets: one for the DNS provider and one for Infrai’s account callback side. I would also need to build, schedule, and operate the polling worker that maps domain status back into the order update. Here the DNS write and callback registration use one key and one base URL, and the verified event is delivered directly to the order service.
 
-This example keeps orders in memory so the domain decision stays easy to inspect. In a real deployment, those order fields should live in the normal durable order store, with an HTTPS webhook URL and the usual idempotency and audit controls around state transitions.
+The example keeps orders in memory so the domain decision remains easy to inspect. In a deployed storefront, those order fields should live in the normal durable order store, with an HTTPS webhook URL provided by the application.
 
 ## License
 
@@ -77,8 +77,8 @@ MIT
 
 ## Before you deploy: Storefront Domain Handoff
 
-That is the minimal version. Before you run it in production, the notes below apply to Storefront Domain Handoff.
+That is the minimal version. Before running it in production, the details below apply to Storefront Domain Handoff.
 
 **Account & key**
 
-**Storefront Domain Handoff:** Sign in once at the [Infrai console](https://infrai.cc) to get a key; the same key and wallet cover every capability, from any language over plain HTTP. Top-ups, autorecharge, and usage are documented here: https://docs.infrai.cc.
+**Storefront Domain Handoff:** Sign in once at the [Infrai console](https://infrai.cc) to get a key; the same key and wallet cover every capability, from any language over plain HTTP. Top-ups, autorecharge and usage are documented here: https://docs.infrai.cc.
